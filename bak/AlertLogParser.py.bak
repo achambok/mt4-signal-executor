@@ -1,0 +1,117 @@
+import time
+import re
+import os
+from datetime import datetime
+
+# ================= CONFIG =================
+
+MT4_LOG_DIR = os.path.expanduser(
+    "~/Library/Application Support/net.metaquotes.wine.metatrader4/drive_c/"
+    "Program Files (x86)/MetaTrader 4/MQL4/Logs"
+)
+
+SIGNAL_FILE = os.path.expanduser(
+    "~/Library/Application Support/net.metaquotes.wine.metatrader4/drive_c/"
+    "Program Files (x86)/MetaTrader 4/MQL4/Files/signal.txt"
+)
+
+RISK = "0.5"
+COMMENT = "MT4_ALERT"
+POLL_INTERVAL = 1  # seconds
+
+# ================= REGEX =================
+# ONLY parse inside Alert message
+ALERT_TEXT_REGEX = re.compile(r"Alert:\s*(.+)", re.IGNORECASE)
+
+# Symbol-safe: FX, XAU, crypto, suffixes
+SYMBOL_REGEX = re.compile(r"\b([A-Z]{3,10}[A-Z0-9._-]*)\b")
+DIR_REGEX = re.compile(r"\((BUY|SELL)\)", re.IGNORECASE)
+
+# ================= HELPERS =================
+
+def today_log_file():
+    return os.path.join(
+        MT4_LOG_DIR,
+        datetime.now().strftime("%Y%m%d") + ".log"
+    )
+
+def write_signal(symbol, direction):
+    ts = int(time.time())
+    line = f"{symbol},{direction},{RISK},{COMMENT},{ts}\n"
+
+    with open(SIGNAL_FILE, "w") as f:
+        f.write(line)
+
+    print(f"[WRITE] {line.strip()}")
+
+# ================= MAIN =================
+
+def main():
+    print("Starting MT4 Alert Log Parser...")
+    print("Watching log directory:", MT4_LOG_DIR)
+
+    last_size = 0
+    current_log = ""
+
+    while True:
+        try:
+            log_file = today_log_file()
+
+            if log_file != current_log:
+                current_log = log_file
+                last_size = 0
+                print("[INFO] Using log:", current_log)
+
+            if not os.path.exists(current_log):
+                time.sleep(1)
+                continue
+
+            size = os.path.getsize(current_log)
+            if size > last_size:
+                with open(current_log, "r", errors="ignore") as f:
+                    f.seek(last_size)
+                    lines = f.readlines()
+
+                for line in lines:
+                    if "Alert:" not in line:
+                        continue
+
+                    print("[LOG]", line.strip())
+
+                    alert_match = ALERT_TEXT_REGEX.search(line)
+                    if not alert_match:
+                        print("[SKIP] No Alert text")
+                        continue
+
+                    alert_text = alert_match.group(1)
+
+                    dir_match = DIR_REGEX.search(alert_text)
+                    if not dir_match:
+                        print("[SKIP] No BUY/SELL")
+                        continue
+
+                    symbol_match = SYMBOL_REGEX.search(alert_text)
+                    if not symbol_match:
+                        print("[SKIP] No symbol")
+                        continue
+
+                    symbol = symbol_match.group(1).upper()
+                    direction = dir_match.group(1).upper()
+
+                    write_signal(symbol, direction)
+
+                last_size = size
+
+            time.sleep(POLL_INTERVAL)
+
+        except KeyboardInterrupt:
+            print("Stopped.")
+            break
+        except Exception as e:
+            print("[ERROR]", e)
+            time.sleep(2)
+
+# ================= ENTRY =================
+
+if __name__ == "__main__":
+    main()

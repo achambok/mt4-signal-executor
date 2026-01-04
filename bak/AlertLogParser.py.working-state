@@ -1,0 +1,147 @@
+import time
+import re
+import os
+from datetime import datetime
+
+# ================= CONFIG =================
+
+MT4_LOG_DIR = os.path.expanduser(
+    "~/Library/Application Support/net.metaquotes.wine.metatrader4/drive_c/"
+    "Program Files (x86)/MetaTrader 4/MQL4/Logs"
+)
+
+SIGNAL_FILE = os.path.expanduser(
+    "~/Library/Application Support/net.metaquotes.wine.metatrader4/drive_c/"
+    "Program Files (x86)/MetaTrader 4/MQL4/Files/signal.txt"
+)
+
+RISK = "0.5"
+COMMENT = "MT4_ALERT"
+POLL_INTERVAL = 1  # seconds
+STALE_SECONDS = 10  # alerts older than this are ignored
+
+# ================= REGEX =================
+
+ALERT_TEXT_REGEX = re.compile(r"Alert:\s*(.+)", re.IGNORECASE)
+SYMBOL_REGEX = re.compile(r"\b([A-Z]{3,10}[A-Z0-9._-]*)\b")
+DIR_REGEX = re.compile(r"\((BUY|SELL)\)", re.IGNORECASE)
+
+# ================= STATE =================
+
+last_signals = {}  # symbol → (direction, timestamp)
+
+# ================= HELPERS =================
+
+def today_log_file():
+    return os.path.join(
+        MT4_LOG_DIR,
+        datetime.now().strftime("%Y%m%d") + ".log"
+    )
+
+def write_signals(signals):
+    """
+    Atomic write: write to .tmp first, then rename
+    signals: list of (symbol, direction, timestamp)
+    """
+    tmp_file = SIGNAL_FILE + ".tmp"
+    try:
+        with open(tmp_file, "w") as f:
+            for sym, dir, ts in signals:
+                line = f"{sym},{dir},{RISK},{COMMENT},{ts}\n"
+                f.write(line)
+        os.replace(tmp_file, SIGNAL_FILE)
+        for sym, dir, ts in signals:
+            print(f"[WRITE] {sym},{dir},{RISK},{COMMENT},{ts}")
+    except Exception as e:
+        print("[ERROR] Writing signals:", e)
+
+def parse_alert_line(line):
+    alert_match = ALERT_TEXT_REGEX.search(line)
+    if not alert_match:
+        return None
+    alert_text = alert_match.group(1)
+
+    dir_match = DIR_REGEX.search(alert_text)
+    if not dir_match:
+        return None
+
+    symbol_match = SYMBOL_REGEX.search(alert_text)
+    if not symbol_match:
+        return None
+
+    symbol = symbol_match.group(1).upper()
+    direction = dir_match.group(1).upper()
+    return symbol, direction
+
+# ================= MAIN =================
+
+def main():
+    print("Starting MT4 Alert Log Parser...")
+    print("Watching log directory:", MT4_LOG_DIR)
+
+    last_size = 0
+    current_log = ""
+
+    while True:
+        try:
+            log_file = today_log_file()
+
+            if log_file != current_log:
+                current_log = log_file
+                last_size = 0
+                print("[INFO] Using log:", current_log)
+
+            if not os.path.exists(current_log):
+                time.sleep(1)
+                continue
+
+            size = os.path.getsize(current_log)
+            if size > last_size:
+                with open(current_log, "r", errors="ignore") as f:
+                    f.seek(last_size)
+                    lines = f.readlines()
+
+                new_signals = []
+                now_ts = int(time.time())
+
+                for line in lines:
+                    if "Alert:" not in line:
+                        continue
+
+                    print("[LOG]", line.strip())
+
+                    parsed = parse_alert_line(line)
+                    if not parsed:
+                        print("[SKIP] Could not parse symbol or direction")
+                        continue
+
+                    symbol, direction = parsed
+
+                    # Duplicate suppression
+                    last = last_signals.get(symbol)
+                    if last and last[0] == direction:
+                        if now_ts - last[1] < STALE_SECONDS:
+                            print(f"[SKIP] Duplicate/stale alert for {symbol} ({direction})")
+                            continue
+
+                    last_signals[symbol] = (direction, now_ts)
+                    new_signals.append((symbol, direction, now_ts))
+
+                if new_signals:
+                    write_signals(new_signals)
+
+                last_size = size
+
+            time.sleep(POLL_INTERVAL)
+
+        except KeyboardInterrupt:
+            print("Stopped by user.")
+            break
+        except Exception as e:
+            print("[ERROR]", e)
+            time.sleep(2)
+
+# ================= ENTRY =================
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+import os, time, re, tempfile, shutil
+
+LOG_DIR = "/Users/blackrossay/Library/Application Support/net.metaquotes.wine.metatrader4/drive_c/Program Files (x86)/MetaTrader 4/MQL4/Logs"
+SIGNAL_FILE = "/Users/blackrossay/Library/Application Support/net.metaquotes.wine.metatrader4/drive_c/Program Files (x86)/MetaTrader 4/MQL4/Files/signal.txt"
+STALE_MINUTES = 15
+RISK = 0.5
+
+last_signal_ts = {}
+queue = {}
+
+def log(msg): print("[LOG]", msg)
+
+def atomic_write(path, lines):
+    tmp = path + ".tmp"
+    with open(tmp,"w") as f:
+        for l in lines: f.write(l+"\n")
+    shutil.move(tmp,path)
+
+def parse_alert(alert):
+    # Example: 'USDJPY M15 Entry point 1.3 (SELL) RR:1'
+    m = re.search(r'([A-Z0-9]+).*\((BUY|SELL)\)(?:.*RR:(\d+(\.\d+)?))?', alert)
+    if not m: return None
+    symbol, direction, rr, _ = m.groups()
+    rr = float(rr) if rr else 1.0
+    ts = int(time.time())
+    return symbol, direction, RISK, f"MT4_ALERT|RR:{rr}", ts
+
+def process_line(line):
+    parsed = parse_alert(line)
+    if not parsed: return
+    symbol, direction, risk, comment, ts = parsed
+    key = f"{symbol}_{direction}"
+    if key in last_signal_ts and ts - last_signal_ts[key] < STALE_MINUTES*60:
+        log(f"[SKIP] Duplicate/stale alert for {symbol} ({direction})")
+        return
+    last_signal_ts[key] = ts
+    if symbol not in queue: queue[symbol] = []
+    queue[symbol].append(f"{symbol},{direction},{risk},{comment},{ts}")
+    log(f"[WRITE] {symbol},{direction},{risk},{comment},{ts}")
+
+def flush_queue():
+    all_lines = []
+    for sym_lines in queue.values(): all_lines.extend(sym_lines)
+    if all_lines: atomic_write(SIGNAL_FILE, all_lines)
+    queue.clear()
+
+def main():
+    log("Starting MT4 Alert Log Parser with atomic writes...")
+    # find latest log
+    logs = [f for f in os.listdir(LOG_DIR) if f.endswith(".log")]
+    if not logs: log("[ERROR] No log files"); return
+    logs.sort()
+    log_file = os.path.join(LOG_DIR, logs[-1])
+    log(f"Watching log: {log_file}")
+    with open(log_file,"r") as f:
+        f.seek(0,2) # go to end
+        while True:
+            line = f.readline()
+            if not line: time.sleep(0.1); continue
+            line = line.strip()
+            if "Alert:" not in line: continue
+            process_line(line)
+            flush_queue()
+
+if __name__=="__main__":
+    main()

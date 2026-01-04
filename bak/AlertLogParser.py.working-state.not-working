@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os
+import re
+import time
+
+# ==================== CONFIG ====================
+LOG_DIR = os.path.expanduser(
+    "~/Library/Application Support/net.metaquotes.wine.metatrader4/drive_c/Program Files (x86)/MetaTrader 4/MQL4/Logs"
+)
+SIGNAL_FILE = os.path.expanduser(
+    "~/Library/Application Support/net.metaquotes.wine.metatrader4/drive_c/Program Files (x86)/MetaTrader 4/MQL4/Files/signal.txt"
+)
+STALE_SECONDS = 15 * 60  # 15 minutes
+RISK = 0.5  # default lot risk
+
+# Regex patterns
+ENTRY_RE = re.compile(r"'?([A-Z0-9]+)\s+[A-Z0-9]+ Entry point.*\((BUY|SELL)\)'?", re.IGNORECASE)
+ALL_TF_RE = re.compile(r"'?([A-Z0-9]+)\s+All timeframes are\s+(BUY|SELL)'?", re.IGNORECASE)
+
+# ==================== GLOBALS ====================
+last_signal_ts = {}
+queued_signals = {}
+
+# ==================== LOGGING ====================
+def log(msg):
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] {msg}")
+
+# ==================== ATOMIC WRITE ====================
+def atomic_write(filename, lines):
+    tmp_file = filename + ".tmp"
+    with open(tmp_file, "w") as f:
+        for line in lines:
+            f.write(line + "\n")
+    os.replace(tmp_file, filename)
+    log(f"[WRITE] {len(lines)} signal(s) written to {filename}")
+
+# ==================== SIGNAL QUEUE ====================
+def queue_signal(symbol, direction, rr=1.0):
+    now_ts = int(time.time())
+    key = f"{symbol}|{direction}"
+
+    # Skip duplicates or stale signals
+    last_ts = last_signal_ts.get(key, 0)
+    if now_ts - last_ts < 1:  # ignore exact duplicates within 1s
+        log(f"[SKIP] Duplicate/stale alert for {symbol} ({direction})")
+        return
+
+    last_signal_ts[key] = now_ts
+    comment = f"MT4_ALERT|RR:{rr}"
+    line = f"{symbol},{direction},{RISK},{comment},{now_ts}"
+
+    if symbol not in queued_signals:
+        queued_signals[symbol] = []
+    queued_signals[symbol].append(line)
+    log(f"[QUEUE] {line}")
+
+# ==================== PARSE ALERT ====================
+def parse_alert_line(line):
+    line = line.strip()
+    if not line:
+        return
+
+    # Try classic Entry point alert
+    m = ENTRY_RE.search(line)
+    if m:
+        symbol, direction = m.group(1).upper(), m.group(2).upper()
+        queue_signal(symbol, direction, rr=1.0)
+        return
+
+    # Try "All timeframes are BUY/SELL"
+    m2 = ALL_TF_RE.search(line)
+    if m2:
+        symbol, direction = m2.group(1).upper(), m2.group(2).upper()
+        queue_signal(symbol, direction, rr=3.0)
+        return
+
+    log(f"[SKIP] Unrecognized alert format: {line}")
+
+# ==================== FLUSH QUEUE ====================
+def flush_signals():
+    all_lines = []
+    for syms in queued_signals.values():
+        all_lines.extend(syms)
+    if all_lines:
+        atomic_write(SIGNAL_FILE, all_lines)
+        queued_signals.clear()
+
+# ==================== MAIN LOOP ====================
+def main():
+    log("Starting MT4 Alert Log Parser...")
+    if not os.path.exists(LOG_DIR):
+        log(f"[ERROR] Log directory not found: {LOG_DIR}")
+        return
+
+    # Detect the latest log file
+    log_files = sorted([f for f in os.listdir(LOG_DIR) if f.endswith(".log")])
+    if not log_files:
+        log(f"[ERROR] No log files in {LOG_DIR}")
+        return
+    latest_log = os.path.join(LOG_DIR, log_files[-1])
+    log(f"[INFO] Using log: {latest_log}")
+
+    with open(latest_log, "r", encoding="utf-8", errors="ignore") as f:
+        # Seek to end for live monitoring
+        f.seek(0, os.SEEK_END)
+
+        while True:
+            line = f.readline()
+            if not line:
+                time.sleep(0.2)
+                continue
+            parse_alert_line(line)
+            flush_signals()
+
+if __name__ == "__main__":
+    main()

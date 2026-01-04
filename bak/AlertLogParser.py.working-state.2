@@ -1,0 +1,54 @@
+import os
+import time
+import re
+
+SIGNAL_DIR = "/Users/blackrossay/Library/Application Support/net.metaquotes.wine.metatrader4/drive_c/Program Files (x86)/MetaTrader 4/MQL4/Files"
+SIGNAL_FILE = os.path.join(SIGNAL_DIR, "signal.txt")
+TMP_FILE = os.path.join(SIGNAL_DIR, "signal.tmp")
+
+# Keep track of last processed alert to avoid duplicates
+last_alerts = {}
+
+# Example function to parse log line
+def parse_alert_line(line):
+    # Match USDJPY,H1 Entry point 1.3 (BUY)
+    m = re.search(r"Alert:\s+([A-Z0-9]+).+Entry point [\d\.]+(?:nz)? \((BUY|SELL)\)", line)
+    if m:
+        symbol = m.group(1)
+        direction = m.group(2)
+        ts = int(time.time())
+        key = f"{symbol}_{direction}"
+        if key in last_alerts and ts - last_alerts[key] < 10:  # 10s duplicate guard
+            return None
+        last_alerts[key] = ts
+        return f"{symbol},{direction},0.5,MT4_ALERT|RR:1,{ts}"
+    return None
+
+# Atomic write function
+def write_signal_atomic(signal_line):
+    try:
+        with open(TMP_FILE, "w") as f:
+            f.write(signal_line + "\n")
+        os.replace(TMP_FILE, SIGNAL_FILE)  # atomic rename
+        print(f"[WRITE] {signal_line}")
+    except Exception as e:
+        print("[ERROR] Failed to write signal:", e)
+
+# Example main loop
+def main():
+    print("Starting MT4 Alert Log Parser with atomic writes...")
+    log_file = "/Users/blackrossay/Library/Application Support/net.metaquotes.wine.metatrader4/drive_c/Program Files (x86)/MetaTrader 4/MQL4/Logs/20260103.log"
+    
+    with open(log_file, "r") as f:
+        f.seek(0,2)  # move to EOF
+        while True:
+            line = f.readline()
+            if not line:
+                time.sleep(0.1)
+                continue
+            signal_line = parse_alert_line(line)
+            if signal_line:
+                write_signal_atomic(signal_line)
+
+if __name__ == "__main__":
+    main()

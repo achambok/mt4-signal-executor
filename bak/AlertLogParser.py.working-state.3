@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+import os
+import time
+import re
+
+# ================= CONFIG =================
+SIGNAL_DIR = "/Users/blackrossay/Library/Application Support/net.metaquotes.wine.metatrader4/drive_c/Program Files (x86)/MetaTrader 4/MQL4/Files"
+SIGNAL_FILE = os.path.join(SIGNAL_DIR, "signal.txt")
+TMP_FILE    = os.path.join(SIGNAL_DIR, "signal.tmp")
+
+# Time in seconds to consider a signal duplicate/stale
+DUPLICATE_GUARD_SECONDS = 10
+
+# MT4 log file to watch
+LOG_DIR = "/Users/blackrossay/Library/Application Support/net.metaquotes.wine.metatrader4/drive_c/Program Files (x86)/MetaTrader 4/MQL4/Logs"
+LOG_FILE = None  # auto-detect latest
+
+# Keep track of last signals per symbol+direction
+last_signals = {}
+
+# ================= LOGGING =================
+def log(msg):
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {msg}")
+
+# ================= FIND LATEST LOG =================
+def find_latest_log():
+    files = [f for f in os.listdir(LOG_DIR) if f.endswith(".log")]
+    if not files:
+        return None
+    files.sort()
+    return os.path.join(LOG_DIR, files[-1])
+
+# ================= PARSE ALERT LINE =================
+def parse_alert_line(line):
+    """
+    Parse MT4 alert lines, returns signal string for EA or None
+    Expected alert format example:
+    "TPSproTREND PrO V6 USDJPY,M15: Alert: USDJPY M15 Entry point 1.3 (BUY)"
+    """
+    m = re.search(r"Alert:\s+([A-Z0-9]+).+Entry point [\d\.]+(?:nz)? \((BUY|SELL)\)", line)
+    if m:
+        symbol = m.group(1)
+        direction = m.group(2)
+        ts = int(time.time())
+
+        # Duplicate/stale guard
+        key = f"{symbol}_{direction}"
+        if key in last_signals and ts - last_signals[key] < DUPLICATE_GUARD_SECONDS:
+            log(f"[SKIP] Duplicate/stale alert for {symbol} ({direction})")
+            return None
+        last_signals[key] = ts
+
+        # Try to detect RR from line (1.0, 1.3, etc.)
+        rr = 1.0
+        rr_m = re.search(r"Entry point\s+[\d\.]+(?:nz)?\s*\((BUY|SELL)\).*?(\d\.\d+)", line)
+        if rr_m:
+            try:
+                rr = float(rr_m.group(2))
+            except:
+                rr = 1.0
+
+        # Compose signal line: SYMBOL,DIRECTION,RISK,COMMENT,TIMESTAMP
+        comment = f"MT4_ALERT|RR:{rr}"
+        signal_line = f"{symbol},{direction},0.5,{comment},{ts}"
+        return signal_line
+    return None
+
+# ================= ATOMIC FILE WRITE =================
+def append_signal_atomic(signal_line):
+    """
+    Reads current signals, appends new one, writes atomically
+    """
+    try:
+        # Read existing lines if file exists
+        lines = []
+        if os.path.exists(SIGNAL_FILE):
+            with open(SIGNAL_FILE,"r") as f:
+                lines = [l.strip() for l in f if l.strip()]
+
+        # Append new signal
+        lines.append(signal_line)
+
+        # Write to tmp file
+        with open(TMP_FILE,"w") as f:
+            for l in lines:
+                f.write(l+"\n")
+
+        # Rename atomically
+        os.replace(TMP_FILE,SIGNAL_FILE)
+        log(f"[WRITE] {signal_line}")
+    except Exception as e:
+        log(f"[ERROR] Failed to append signal: {e}")
+
+# ================= MAIN LOOP =================
+def main():
+    global LOG_FILE
+    log("Starting MT4 Alert Log Parser with multi-symbol queueing...")
+
+    LOG_FILE = find_latest_log()
+    if not LOG_FILE:
+        log("[ERROR] No MT4 log file found in "+LOG_DIR)
+        return
+
+    log(f"[INFO] Using log: {LOG_FILE}")
+
+    # Open file and seek to EOF
+    with open(LOG_FILE,"r") as f:
+        f.seek(0,2)
+        while True:
+            line = f.readline()
+            if not line:
+                time.sleep(0.1)
+                continue
+            line = line.strip()
+            if not line:
+                continue
+
+            signal_line = parse_alert_line(line)
+            if signal_line:
+                append_signal_atomic(signal_line)
+            else:
+                log(f"[LOG] {line}")
+
+# ================= ENTRY POINT =================
+if __name__=="__main__":
+    main()
